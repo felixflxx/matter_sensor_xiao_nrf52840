@@ -20,6 +20,20 @@ public:
 
 	CHIP_ERROR StartApp();
 
+	void UpdateClustersState();
+
 private:
 	CHIP_ERROR Init();
+
+	static void MatterEventHandler(const chip::DeviceLayer::ChipDeviceEvent *event, intptr_t arg);
+
+	static void MeasurementsTimerHandler();
+
+	void UpdateTemperatureClusterState();
+
+	void UpdateHumidityClusterState();
+#ifdef CONFIG_FUEL_GAUGE
+	void UpdateBatteryClusterState();
+#endif
+
 };

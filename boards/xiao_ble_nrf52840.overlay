@@ -1,0 +1,77 @@
+/ {
+
+	buttons {
+	
+		compatible = "gpio-keys";
+	
+		button0: button_0 {
+			gpios = <&xiao_d 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Push button switch 0";
+			zephyr,code = <INPUT_KEY_0>;
+		
+		};
+	
+		button1: button_1 {
+			gpios = <&xiao_d 4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Push button switch 1";
+			zephyr,code = <INPUT_KEY_1>;
+		};
+	
+		button2: button_2 {
+			gpios = <&xiao_d 5 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Push button switch 2";
+			zephyr,code = <INPUT_KEY_2>;
+		};
+	
+		button3: button_3 {
+			gpios = <&xiao_d 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Push button switch 3";
+			zephyr,code = <INPUT_KEY_3>;
+		};
+	
+	};
+};
+
+&spi2 {
+	status = "disabled";
+};
+
+/* Change the pin mappings on the xiao */
+&pinctrl {
+	i2c1_default: i2c1_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 15)>,
+				<NRF_PSEL(TWIM_SCL, 1, 14)>;
+		};
+	};
+
+	i2c1_sleep: i2c1_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 15)>,
+				<NRF_PSEL(TWIM_SCL, 1, 14)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	compatible = "nordic,nrf-twim";
+
+    pinctrl-0 = <&i2c1_default>;
+    pinctrl-1 = <&i2c1_sleep>;
+    pinctrl-names = "default", "sleep";
+
+	sht4x@44 {
+		compatible = "sensirion,sht4x";
+		repeatability = <2>;
+		reg = <0x44>;
+	};
+
+	max17048@36 {
+		compatible = "maxim,max17048";
+		reg = <0x36>;
+		status = "okay";
+	};	
+};
+

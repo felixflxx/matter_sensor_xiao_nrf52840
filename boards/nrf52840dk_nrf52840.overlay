@@ -32,3 +32,21 @@
 &usbd {
 	status = "disabled";
 };
+
+&i2c1 {
+	status = "okay";
+	compatible = "nordic,nrf-twim";
+
+	sht4x@44 {
+		compatible = "sensirion,sht4x";
+		repeatability = <2>;
+		reg = <0x44>;
+	};
+
+	max17048@36 {
+		compatible = "maxim,max17048";
+		reg = <0x36>;
+		status = "okay";
+	};	
+};
+
