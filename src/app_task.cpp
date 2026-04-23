@@ -48,10 +48,16 @@ namespace {
 	constexpr uint16_t kHumidityMeasurementAttributeMinValue = 0; // 0.00%
 	constexpr uint16_t kHumidityMeasurementAttributeInvalidValue = 0xffff; // Invalid value
 
+	//Endpoint and attribute constants for Pressure Measurement
+	constexpr uint8_t kPressureMeasurementEndpointId = 3; // (Meistens ist Pressure auf Endpoint 3)
+	constexpr int16_t kPressureMeasurementAttributeMaxValue = 32767;
+	constexpr int16_t kPressureMeasurementAttributeMinValue = -32767;
+	constexpr int16_t kPressureMeasurementAttributeInvalidValue = 0x8000;
+
 	k_timer sMeasurementsTimer;
 	bool sIsMeasurementTimerStarted = false;
 
-	const device *sht4x_dev = DEVICE_DT_GET_ONE(sensirion_sht4x);
+	const device *bme280_dev = DEVICE_DT_GET_ONE(bosch_bme280);
 
 #ifdef CONFIG_FUEL_GAUGE
 	constexpr uint8_t kPowerSourceEndpointId = 0;
@@ -83,7 +89,7 @@ void AppTask::UpdateTemperatureClusterState()
 {
 	struct sensor_value sTemperature;
 	Protocols::InteractionModel::Status status;
-	int result = sensor_channel_get(sht4x_dev, SENSOR_CHAN_AMBIENT_TEMP, &sTemperature);
+	int result = sensor_channel_get(bme280_dev, SENSOR_CHAN_AMBIENT_TEMP, &sTemperature);
 
 	if (result == 0) {
 		// The MeasuredValue attribute is in 1/100ths of a degree Celsius.
@@ -118,7 +124,7 @@ void AppTask::UpdateHumidityClusterState()
 {
 	struct sensor_value sHumidity;
 	Protocols::InteractionModel::Status status;
-	int result = sensor_channel_get(sht4x_dev, SENSOR_CHAN_HUMIDITY, &sHumidity);
+	int result = sensor_channel_get(bme280_dev, SENSOR_CHAN_HUMIDITY, &sHumidity);
 
 	if (result == 0) {
 		// Round the humidity reading to the nearest whole percentage.
@@ -149,6 +155,36 @@ void AppTask::UpdateHumidityClusterState()
 		LOG_ERR("Getting humidity measurement data from BME280 failed with: %d", result);
 	}
 }
+
+
+void AppTask::UpdatePressureClusterState()
+{
+    struct sensor_value sPressure;
+    Protocols::InteractionModel::Status status;
+    
+    // Zephyr holt den Luftdruck aus dem BME280 RAM
+    int result = sensor_channel_get(bme280_dev, SENSOR_CHAN_PRESS, &sPressure);
+
+    if (result == 0) {
+        // Umrechnung für Matter: (kPa * 10) + (Millionstel kPa / 100.000)
+        int16_t newValue = static_cast<int16_t>(sPressure.val1 * 10 + sPressure.val2 / 100000);
+
+        LOG_DBG("New pressure: %d.%06d kPa, Matter attribute: %d", sPressure.val1, sPressure.val2, newValue);
+
+        if (newValue > kPressureMeasurementAttributeMaxValue || newValue < kPressureMeasurementAttributeMinValue) {
+            newValue = kPressureMeasurementAttributeInvalidValue;
+        }
+
+        status = Clusters::PressureMeasurement::Attributes::MeasuredValue::Set(kPressureMeasurementEndpointId, newValue);
+        if (status != Protocols::InteractionModel::Status::Success) {
+            LOG_ERR("Updating pressure measurement failed: %x", to_underlying(status));
+        }
+    } else {
+        LOG_ERR("Getting pressure from BME280 failed with: %d", result);
+    }
+}
+
+
 #ifdef CONFIG_FUEL_GAUGE
 void AppTask::UpdateBatteryClusterState()
 {
@@ -242,14 +278,15 @@ void AppTask::MeasurementsTimerHandler()
 void AppTask::UpdateClustersState()
 {
 	// Fetch a new sample from the sensor. This updates all channels.
-	const int result_bme = sensor_sample_fetch(sht4x_dev);
+	const int result_bme = sensor_sample_fetch(bme280_dev);
 
 	if (result_bme == 0) {
 		// Update both clusters with the new data.
 		UpdateTemperatureClusterState();
 		UpdateHumidityClusterState();
+		UpdatePressureClusterState();
 	} else {
-		LOG_ERR("Fetching data from SHT4X sensor failed with: %d", result_bme);
+		LOG_ERR("Fetching data from BME280 sensor failed with: %d", result_bme);
 	}
 #ifdef CONFIG_FUEL_GAUGE
 	UpdateBatteryClusterState();
@@ -272,7 +309,7 @@ CHIP_ERROR AppTask::Init()
 
 	ReturnErrorOnFailure(Nrf::Matter::RegisterEventHandler(MatterEventHandler, 0));
 
-	if (!device_is_ready(sht4x_dev)) {
+	if (!device_is_ready(bme280_dev)) {
 		LOG_ERR("SHT4X sensor device not ready");
 		return chip::System::MapErrorZephyr(-ENODEV);
 	}

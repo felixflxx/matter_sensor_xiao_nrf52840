@@ -32,6 +32,8 @@ private:
 	void UpdateTemperatureClusterState();
 
 	void UpdateHumidityClusterState();
+
+	void UpdatePressureClusterState();
 #ifdef CONFIG_FUEL_GAUGE
 	void UpdateBatteryClusterState();
 #endif
