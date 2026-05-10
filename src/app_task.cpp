@@ -16,6 +16,10 @@
 
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/gpio.h> 
+#include <zephyr/drivers/adc.h>
+#include <zephyr/kernel.h>
+
 
 #ifdef CONFIG_FUEL_GAUGE
 #include <zephyr/drivers/fuel_gauge.h>
@@ -59,13 +63,65 @@ namespace {
 
 	const device *bme280_dev = DEVICE_DT_GET_ONE(bosch_bme280);
 
-#ifdef CONFIG_FUEL_GAUGE
+	const struct gpio_dt_spec led_blue = GPIO_DT_SPEC_GET(DT_NODELABEL(led2), gpios);
+	const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_NODELABEL(led1), gpios);
+
+	//ladezeug
 	constexpr uint8_t kPowerSourceEndpointId = 0;
-	const device *max17048_dev = DEVICE_DT_GET_ONE(maxim_max17048);
-#endif
+	const struct gpio_dt_spec read_bat_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(bat_enable), gpios);
+	const struct gpio_dt_spec chg_stat = GPIO_DT_SPEC_GET(DT_NODELABEL(charge_stat), gpios);
+	const struct gpio_dt_spec hi_chgn = GPIO_DT_SPEC_GET(DT_NODELABEL(high_charge), gpios);
+	const struct adc_dt_spec ain7_bat = ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0);
+
+
+	uint32_t buf = 0;
+
+	// Typische Spannungspunkte eines Li-Ion / Li-Po Akkus (in mV)
+	static const int voltage_table[] = {
+		3300, // 0%   - Akku leer (tiefer sollte man nicht gehen)
+		3500, // 5%   - Steiler Abfall am Ende
+		3650, // 20%
+		3800, // 40%  - Langes, flaches Plateau
+		3950, // 70%  - Langes, flaches Plateau
+		4100, // 90%
+		4200  // 100% - Akku voll geladen
+	};
+
+	static const int percent_table[] = {
+		0, 5, 20, 40, 70, 90, 100
+	};
+
+	#define TABLE_SIZE (sizeof(voltage_table) / sizeof(voltage_table[0]))
+
+
+	struct adc_sequence sequence = {
+		.buffer = &buf,
+		/* buffer size in bytes, not number of samples */
+		.buffer_size = sizeof(buf),
+		.calibrate = false
+	};
 
 
 } //namespace
+
+int lipo_voltage_to_percent(int voltage_mv) {
+    // Limits abfangen (außerhalb der Tabelle)
+    if (voltage_mv <= voltage_table[0]) return 0;
+    if (voltage_mv >= voltage_table[TABLE_SIZE - 1]) return 100;
+
+    // Passenden Bereich finden und linear interpolieren
+    for (int i = 1; i < TABLE_SIZE; i++) {
+        if (voltage_mv <= voltage_table[i]) {
+            // Lineare Interpolation (y = y0 + (x - x0) * (y1 - y0) / (x1 - x0))
+            int dV = voltage_table[i] - voltage_table[i - 1]; // x1 - x0
+            int dP = percent_table[i] - percent_table[i - 1]; // y1 - y0
+            
+            return percent_table[i - 1] + ((voltage_mv - voltage_table[i - 1]) * dP) / dV;
+        }
+    }
+    
+    return 100; // Fallback
+}
 
 void AppTask::MatterEventHandler(const ChipDeviceEvent *event, intptr_t arg)
 {
@@ -185,90 +241,80 @@ void AppTask::UpdatePressureClusterState()
 }
 
 
-#ifdef CONFIG_FUEL_GAUGE
+
 void AppTask::UpdateBatteryClusterState()
 {
-	union fuel_gauge_prop_val val_pct;
-	union fuel_gauge_prop_val val_volt;
-	union fuel_gauge_prop_val val_runtime_full; // NEW: Changed variable name
+	LOG_DBG("Batterie Update Funktion aufgerufen!");
 	Protocols::InteractionModel::Status status;
 
-	// 1. Get Battery Percentage
-	int rc = fuel_gauge_get_prop(max17048_dev, FUEL_GAUGE_RELATIVE_STATE_OF_CHARGE, &val_pct);
-
-	if (rc == 0) {
-		// Driver gives 0-100 (val_pct.relative_state_of_charge)
-		// Matter spec (BatPercentRemaining) is 0-200 (in 0.5% units)
-		uint8_t matter_pct = static_cast<uint8_t>(val_pct.relative_state_of_charge * 2);
-
-		LOG_DBG("New battery percentage: %d%%, attribute value: %d", val_pct.relative_state_of_charge, matter_pct);
-
-		status = Clusters::PowerSource::Attributes::BatPercentRemaining::Set(kPowerSourceEndpointId, matter_pct);
-		if (status != Protocols::InteractionModel::Status::Success) {
-			LOG_ERR("Updating BatPercentRemaining failed: %x", to_underlying(status));
-		}
+	// 1. Get Battery Voltage			DONE
+	int32_t val_mv;
+	int err = adc_read_dt(&ain7_bat, &sequence);
+			if (err < 0) {
+				LOG_ERR("Could not read (%d)\n", err);
+				chip::System::MapErrorZephyr(-ENODEV);
+				return;
+			}
+	if (ain7_bat.channel_cfg.differential) {
+				val_mv = (int32_t)((int16_t)buf);
 	} else {
-		LOG_ERR("Getting battery percentage failed with: %d", rc);
-		// Set to "unknown" (0xFF) on failure
-		status = Clusters::PowerSource::Attributes::BatPercentRemaining::Set(kPowerSourceEndpointId, 0xFF);
-		if (status != Protocols::InteractionModel::Status::Success) {
-			LOG_ERR("Setting BatPercentRemaining to 'unknown' failed: %x", to_underlying(status));
-		}
+		val_mv = (int32_t)buf;
 	}
+	LOG_DBG("%"PRId32, val_mv);
+	err = adc_raw_to_millivolts_dt(&ain7_bat,
+						&val_mv);
+	/* conversion to mV may not be supported, skip if not */
+	if (err < 0) {
+		LOG_ERR(" (value in mV not available)\n");
+	}
+	int32_t bat_mv = val_mv * 1510 / 510;
+	status = Clusters::PowerSource::Attributes::BatVoltage::Set(kPowerSourceEndpointId, bat_mv);
 
-	// 2. Get Battery Voltage
-	rc = fuel_gauge_get_prop(max17048_dev, FUEL_GAUGE_VOLTAGE, &val_volt);
-	if (rc == 0) {
-		// Driver gives uV. Matter attribute (BatVoltage) is in mV.
-		uint32_t matter_volt_mv = val_volt.voltage / 1000;
-		LOG_DBG("New battery voltage: %u uV, attribute value: %u mV", val_volt.voltage, matter_volt_mv);
-
-		status = Clusters::PowerSource::Attributes::BatVoltage::Set(kPowerSourceEndpointId, matter_volt_mv);
-		if (status != Protocols::InteractionModel::Status::Success) {
-			LOG_ERR("Updating BatVoltage failed: %x", to_underlying(status));
-		}
-	} else {
-		LOG_ERR("Getting battery voltage failed with: %d", rc);
+	if (status != Protocols::InteractionModel::Status::Success) {
+		LOG_ERR("Updating BatVoltage failed: %x", to_underlying(status));
 		// Set to "unknown" (0xFFFFFFFF) on failure
 		status = Clusters::PowerSource::Attributes::BatVoltage::Set(kPowerSourceEndpointId, 0xFFFFFFFF);
 		if (status != Protocols::InteractionModel::Status::Success) {
-			LOG_ERR("Setting BatVoltage to 'unknown' failed: %x", to_underlying(status));
+		LOG_ERR("Setting BatVoltage to 'unknown' failed: %x", to_underlying(status));
 		}
 	}
+	
+	
 
-	// 3. Get Charging State
+	// 2. Get Battery Percentage
+
+	int bat_prozent = lipo_voltage_to_percent(bat_mv);
+
+	uint8_t matter_pct = static_cast<uint8_t>(bat_prozent * 2);
+
+	LOG_DBG("New battery percentage: %d", bat_prozent);
+
+	status = Clusters::PowerSource::Attributes::BatPercentRemaining::Set(kPowerSourceEndpointId, matter_pct);
+	if (status != Protocols::InteractionModel::Status::Success) {
+		LOG_ERR("Updating BatPercentRemaining failed: %x", to_underlying(status));
+	}
+
+	// 3. Get Charging State		DONE
 	// The driver returns 'true' if charging
-	rc = fuel_gauge_get_prop(max17048_dev, FUEL_GAUGE_RUNTIME_TO_FULL, &val_runtime_full);
-	if (rc == 0) {
+	int val = gpio_pin_get_dt(&chg_stat);
 		Clusters::PowerSource::BatChargeStateEnum charge_state;
 
-		if (val_runtime_full.runtime_to_full > 0) {
-			// If time to full is > 0, we are charging
-			charge_state = Clusters::PowerSource::BatChargeStateEnum::kIsCharging;
-		} else {
-			// Otherwise, we are not charging (or are full)
-			charge_state = Clusters::PowerSource::BatChargeStateEnum::kIsNotCharging;
-		}
-		// NOTE: This driver doesn't seem to have a "battery full" state.
-		// kNotCharging is the best fit for discharging or full.
+	if (val == 0) {
+		// If time to full is > 0, we are charging
+		charge_state = Clusters::PowerSource::BatChargeStateEnum::kIsCharging;
+	} else if (val == 1) {
+		// Otherwise, we are not charging (or are full)
+		charge_state = Clusters::PowerSource::BatChargeStateEnum::kIsNotCharging;
+	}
+	// NOTE: When Reading PIN directly "battery full" state is not available.
+	// kNotCharging is the best fit for discharging or full.
 
-		LOG_DBG("New battery runtime to full: %d, attribute value: %d", val_runtime_full.runtime_to_full, (uint8_t)charge_state);
-		status = Clusters::PowerSource::Attributes::BatChargeState::Set(kPowerSourceEndpointId, charge_state);
-		if (status != Protocols::InteractionModel::Status::Success) {
-			LOG_ERR("Updating BatChargeState failed: %x", to_underlying(status));
-		}
-
-	} else {
-		LOG_ERR("Getting battery runtime to full failed with: %d", rc);
-		// Set to "unknown" (0x03) on failure
-		status = Clusters::PowerSource::Attributes::BatChargeState::Set(kPowerSourceEndpointId,
-										Clusters::PowerSource::BatChargeStateEnum::kUnknown);
-		if (status != Protocols::InteractionModel::Status::Success) {
-			LOG_ERR("Setting BatChargeState to 'unknown' failed: %x", to_underlying(status));
-		}
+	LOG_DBG("Battery state is %u", (uint8_t)charge_state);
+	status = Clusters::PowerSource::Attributes::BatChargeState::Set(kPowerSourceEndpointId, charge_state);
+	if (status != Protocols::InteractionModel::Status::Success) {
+		LOG_ERR("Updating BatChargeState failed: %x", to_underlying(status));
 	}
 }
-#endif
 
 void AppTask::MeasurementsTimerHandler()
 {
@@ -277,6 +323,8 @@ void AppTask::MeasurementsTimerHandler()
 
 void AppTask::UpdateClustersState()
 {
+	UpdateBatteryClusterState();
+	
 	// Fetch a new sample from the sensor. This updates all channels.
 	const int result_bme = sensor_sample_fetch(bme280_dev);
 
@@ -288,13 +336,48 @@ void AppTask::UpdateClustersState()
 	} else {
 		LOG_ERR("Fetching data from BME280 sensor failed with: %d", result_bme);
 	}
-#ifdef CONFIG_FUEL_GAUGE
-	UpdateBatteryClusterState();
-#endif
 }
 
 CHIP_ERROR AppTask::Init()
 {
+	//led config
+	if (device_is_ready(led_blue.port)) {
+        gpio_pin_configure_dt(&led_blue, GPIO_OUTPUT_INACTIVE);
+    }
+	if (device_is_ready(led_green.port)) {
+        gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
+    }
+
+	//chg config
+	if (device_is_ready(read_bat_enable.port)) {
+        gpio_pin_configure_dt(&read_bat_enable, GPIO_OUTPUT_INACTIVE);
+		gpio_pin_set_dt(&read_bat_enable, 0);
+    }
+	if (device_is_ready(chg_stat.port)) {
+        gpio_pin_configure_dt(&chg_stat, GPIO_INPUT);
+    }
+	if (device_is_ready(hi_chgn.port)) {
+        gpio_pin_configure_dt(&hi_chgn, GPIO_OUTPUT_INACTIVE);
+		gpio_pin_set_dt(&hi_chgn, 0);
+    }
+
+	//adc config
+	if (!adc_is_ready_dt(&ain7_bat)) {
+			LOG_ERR("ADC controller is not ready");
+			return chip::System::MapErrorZephyr(-ENODEV);
+		}
+	int err = adc_channel_setup_dt(&ain7_bat);
+		if (err < 0) {
+			LOG_ERR("Could not setup channel (%d)\n", err);
+			return chip::System::MapErrorZephyr(-EINVAL);
+		}
+	err = adc_sequence_init_dt(&ain7_bat, &sequence);
+    if (err < 0) {
+        LOG_ERR("Could not init sequence %d", err);
+        return chip::System::MapErrorZephyr(-EINVAL);
+    }
+	
+	
 	/* Initialize Matter stack */
 	ReturnErrorOnFailure(Nrf::Matter::PrepareServer());
 
@@ -311,8 +394,12 @@ CHIP_ERROR AppTask::Init()
 
 	if (!device_is_ready(bme280_dev)) {
 		LOG_ERR("SHT4X sensor device not ready");
+		gpio_pin_set_dt(&led_blue, 1);
+		k_sleep(K_MSEC(2000));
 		return chip::System::MapErrorZephyr(-ENODEV);
 	}
+
+	gpio_pin_set_dt(&led_green, 1);
 
 	k_timer_init(&sMeasurementsTimer, [](k_timer *) { Nrf::PostTask([] { MeasurementsTimerHandler(); }); }, nullptr);
 
@@ -324,6 +411,9 @@ CHIP_ERROR AppTask::Init()
 		// Use K_NO_WAIT to get an immediate reading on reboot.
 		k_timer_start(&sMeasurementsTimer, K_NO_WAIT, K_MSEC(kMeasurementsIntervalMs));
 		sIsMeasurementTimerStarted = true;
+		
+		AppTask::Instance().UpdateClustersState();
+		gpio_pin_set_dt(&led_green, 0);
 	}
 
 	return CHIP_NO_ERROR;

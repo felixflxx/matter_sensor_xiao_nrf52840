@@ -1,4 +1,8 @@
 / {
+	zephyr,user {
+        // Hier sagen wir: Der zephyr,user Knoten nutzt den ADC (Controller) an Kanal 7
+        io-channels = <&adc 7>;
+    };
 
 	buttons {
 	
@@ -11,24 +15,27 @@
 		
 		};
 	
-		button1: button_1 {
-			gpios = <&xiao_d 4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Push button switch 1";
-			zephyr,code = <INPUT_KEY_1>;
-		};
-	
-		button2: button_2 {
-			gpios = <&xiao_d 5 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Push button switch 2";
-			zephyr,code = <INPUT_KEY_2>;
-		};
-	
 		button3: button_3 {
 			gpios = <&xiao_d 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "Push button switch 3";
 			zephyr,code = <INPUT_KEY_3>;
 		};
 	
+	};
+
+	custom_gpios {
+		compatible = "gpio-keys";
+		bat_enable: bat_enable {
+			gpios = <&gpio0 14 0>;
+		};
+
+		charge_stat: charge_stat {
+			gpios = <&gpio0 17 GPIO_PULL_UP>;
+		};
+
+		high_charge: high_charge {
+			gpios = <&gpio0 13 0>;
+		};
 	};
 };
 
@@ -40,8 +47,7 @@
 &pinctrl {
 	i2c1_default: i2c1_default {
 		group1 {
-			psels = <NRF_PSEL(TWIM_SDA, 1, 15)>,
-				<NRF_PSEL(TWIM_SCL, 1, 14)>;
+			psels = <NRF_PSEL(TWIM_SDA, 0, 4)>, <NRF_PSEL(TWIM_SCL, 0, 5)>;
 		};
 	};
 
@@ -62,9 +68,50 @@
     pinctrl-1 = <&i2c1_sleep>;
     pinctrl-names = "default", "sleep";
 
-	bme280@77 {
+	bme280@76 {
 		compatible = "bosch,bme280";
-		reg = <0x77>;
+		reg = <0x76>;
 		label = "bosch_bme280";
 	};
+
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+};
+
+/ {
+    /* Deaktiviere den kompletten PWM-LED-Knoten für P0.17 */
+    pwmleds {
+        pwm_led0: pwm_led_0 {
+            status = "disabled";
+        };
+    };
+    
+    /* Wenn die LED in den aliases hinterlegt war, auch dort entfernen, 
+       um Build-Fehler im C-Code zu vermeiden, falls ein Modul darauf zugreift */
+    aliases {
+        /delete-property/ pwm-led0;
+    };
+};
+
+/* Und wie besprochen den Hardware-PWM abschalten, falls du ihn sonst nicht nutzt */
+&pwm0 {
+    status = "disabled";
+};
+
+&adc {
+    status = "okay";
+    #address-cells = <1>;
+    #size-cells = <0>;
+
+    adc_bat_channel: channel@7 {
+        reg = <7>;
+        zephyr,gain = "ADC_GAIN_1_3";
+        zephyr,reference = "ADC_REF_INTERNAL"; 
+        zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+        zephyr,input-positive = <NRF_SAADC_AIN7>;
+        zephyr,resolution = <12>;
+    };
+};
+
+&nfct {
+	status = "disabled";
 };
